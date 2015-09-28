@@ -1,0 +1,395 @@
+---
+title: "Analysis of outcomes from severe weather on US from 1993 to 2011 - Reproducible Research project"
+author: "Armando Güereca"
+date: "September 25, 2015"
+output: html_document
+---
+
+# Synopsis
+
+The U.S. National Oceanic and Atmospheric Administration's (NOAA) [Storm Database][storm_database]
+was used to compare outcomes from storm and severe weather event categories.
+Analyzed data are from 1993--2011.
+Outcomes analyzed are the number of fatalities and injuries and the dollar
+amount of property damage.
+Event categories are convective, extreme temperature, flood, winter,
+and other.
+
+The state that suffered the greatest number of fatalities was Illinois, with
+the most from extreme temperature events (998 fatalities).
+The state that suffered the greatest number of injuries was Texas, with the
+most from flood events (6,951 injuries).
+The state that suffered the greatest property damage was California, with the
+most from flood events ($117.4 billion).
+
+
+# Data Processing
+
+### Environment configuration
+
+We'll work with R Studio (Version 0.99.484), this packages are required on the environment:
+  
+```{r}
+library('data.table')
+library('ggplot2')
+library('knitr')
+
+# Urls from data sources
+storm_data_url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+data_docs_url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf"
+events_faq_url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf"
+# Local files for data sources
+data_docs_file <- file.path(getwd(), "StormDataDocumentation.pdf")
+events_faq_file <- file.path(getwd(), "StormEventsFAQ.pdf")
+storm_data_file <- file.path(getwd(), "StormData.csv.bz2")
+```
+
+For reference about the structure of our raw dataset as well as the details about column names, we can refer to the storm data documentation files.
+
+* National Weather Service [Storm Data Documentation][storm_docs]
+* National Climatic Data Center Storm Events [FAQ][storm_faq]
+
+We are going to download all our datasources, if we haven't already:
+
+```{r downloaddocs, cache=TRUE}
+# Storm data documentation
+if (!file.exists(data_docs_file)) {
+    download.file(data_docs_url, data_docs_file, mode="wb", method="curl")
+}
+# Storm events FAQ
+if (!file.exists(events_faq_file)) {
+    download.file(events_faq_url, events_faq_file, mode="wb", method="curl")
+}
+# Storm database
+if (!file.exists(storm_data_file)) {
+    download.file(storm_data_url, storm_data_file, mode="wb", method="curl")
+}
+```
+
+### Read source database
+
+Raw data file is on CSV format, we read it as a data frame then convert to data table for our analysis.
+
+```{r readcsv, cache=TRUE}
+# This step might take several minutes to run due to the dataset size, don't hold your breath for it ;)
+raw_data <- data.table(read.csv(storm_data_file, stringsAsFactors=FALSE))
+# Schema of our data source, refer to file StormDataDocumentation.pdf for details
+# str(raw_data)
+```
+
+
+### Tidy up data
+
+As expected from a raw data source, we have a large number of observations and several columns needs normalization before we can perform any analysis.
+
+On the following sections we'll incrementally tidy up our dataset.
+
+```{r convertdates, cache=TRUE}
+# Column names as lowercase to simplify our coding
+setnames(raw_data, names(raw_data), tolower(names(raw_data)))
+# Convert the `bgn_date` from character to date object
+raw_data$beginDate <- as.Date(as.character(raw_data$bgn_date), format='%m/%d/%Y %X')
+```
+
+Scale the property damage variable into a the variable `propertyDamage` by combining the values of columns `propdmgexp` and `propdmg`:
+
+* If `propdmgexp` = `B`, then multiply `propdmg` by 1,000,000,000
+* Else if `propdmgexp` = `M`, then multiply `propdmg` by 1,000,000
+* Else if `propdmgexp` = `K`, then multiply `propdmg` by 1,000
+* Else if `propdmgexp` = `H`, then multiply `propdmg` by 100
+* Else leave `propdmg` as-is
+
+```{r}
+# Normalize exponent expression value into upper case
+raw_data$propdmgexp <- toupper(raw_data$propdmgexp)
+# Lets make a quick count of how many rows are by each "exponent" identifier
+kable(raw_data[, .N, propdmgexp], format="html")
+# Compute new variable and get a summary of its statistics
+raw_data <- raw_data[, propertyDamage := ifelse(propdmgexp == "B", propdmg * 1E9, 
+                                                ifelse(propdmgexp == "M", propdmg * 1E6,
+                                                ifelse(propdmgexp == "K", propdmg * 1E3,
+                                                ifelse(propdmgexp == "H", propdmg * 1E2, propdmg))))]
+summary(raw_data$propertyDamage)
+```
+
+Same as before now we scale the crop damage variable into a new variable, `cropDamage` by combining the values of columns `cropdmgexp` and `cropdmg`:
+
+* If `cropdmgexp` = `B`, then multiply `cropdmg` by 1,000,000,000
+* Else if `cropdmgexp` = `M`, then multiply `cropdmg` by 1,000,000
+* Else if `cropdmgexp` = `K`, then multiply `cropdmg` by 1,000
+* Else leave `cropdmg` as-is
+
+```{r}
+# Normalize exponent expression value into upper case
+raw_data <- raw_data[, cropdmgexp := toupper(cropdmgexp)]
+# Lets make a quick count of how many rows are by each "exponent" identifier
+kable(raw_data[, .N, cropdmgexp], format='html')
+# Compute new variable and get a summary of its statistics
+raw_data <- raw_data[, cropDamage := ifelse(cropdmgexp == "B", cropdmg * 1E9, 
+                                            ifelse(cropdmgexp == "M", cropdmg * 1E6, 
+                                            ifelse(cropdmgexp == "K", cropdmg * 1E3, cropdmg)))]
+summary(raw_data$cropDamage)
+```
+
+
+#### Group event types
+
+List the number of unique values of `evtype`.
+The number of unique values is too large to manage without some grouping.
+
+Number of unique values of `evtype`: **`r length(unique(raw_data$evtype))`**
+
+As can be seen by the big number of unique values on `evtype` column, it needs a lot of data cleaning.
+Particularly, values need to be grouped to resolve spelling variations.
+Also, records can have multiple events listed in the `evtype` variable.
+Create indicator variables for common event types.
+
+Our goal is to group event types to mimic the categories found in the [2009 Annual Summaries][2009_summary] (page 3).
+
+We are going to use this function to help us with grouping `evtype` values.
+
+```{r}
+indicator <- function (regex) {
+	indicator_txt <- grepl(regex, raw_data$evtype, ignore.case=TRUE)
+	uniqueEventTypes <- unique(raw_data[indicator_txt, evtype])
+	indicator_txt
+}
+```
+
+Create an indicators for variations of **Lightning**, **Tornado**, **Thunderstorm Wind**, and **Hail**.
+
+List the event types that fall into the category of **Convection**.
+
+```{r}
+regexLightning <- "\\bL\\S+?G\\b"
+regexTornado <- "(NADO)|(\\bTOR\\S+?O\\b|(\\bFUN))"
+regexThunderstorm <- "THUNDERSTORM|TSTM"
+regexWind <- "(WIND)|(WND)"
+regexHail <- "HAIL"
+regex <- paste(regexLightning, regexTornado, regexThunderstorm, regexWind, regexHail, sep="|")
+raw_data$eventConvection <- indicator(regex)
+```
+
+Create an indicators for variations of **Cold** and **Heat**.
+
+List the event types that fall into the category of **Extreme Temperatures**.
+
+```{r}
+regex <- "COLD|HEAT"
+raw_data$eventExtremeTemp <- indicator(regex)
+```
+
+Create an indicators for variations of **Flood** and **Rain**.
+
+List the event types that fall into the category of **Flood**.
+
+```{r}
+regexFlood <- "(\\bFL\\S+?D)"
+regexRain <- "RAIN|PRECIP|SHOWER"
+regex <- paste(regexFlood, regexRain, sep="|")
+raw_data$eventFlood <- indicator(regex)
+```
+
+Create an indicator for variations of **Snow**, **Ice**, **Freeze**, or **Winter Weather**.
+
+List the event types that fall into the category of **Winter**.
+
+```{r}
+regex <- "(SNOW)|(ICE)|(ICY)|(FREEZ)|(WINT)"
+raw_data$eventWinter <- indicator(regex)
+```
+
+Calculate the proportion of records that don't satisfy any one of the defined indicators.
+Calculate the number of unique event types among these records.
+
+List the un-grouped unique event types.
+
+```{r}
+where <- expression(eventConvection == FALSE & eventExtremeTemp == FALSE & eventFlood == FALSE & eventWinter == FALSE)
+ungrouped <- raw_data[eval(where), list(n = .N, prop = .N / nrow(raw_data))]
+prop_uniq <- raw_data[eval(where), .N / nrow(raw_data)]
+uniqueEvtype <- unique(raw_data[eval(where), evtype])
+# Lets see few of those unique events that don't fit on our previous categories
+head(uniqueEvtype[order(uniqueEvtype)], 20)
+```
+
+Records that don't satisfy any one of the defined indicators: **`r ungrouped$n` (`r round(ungrouped$prop * 100)`%)**
+
+Number of unique event types that don't satisfy any one of the defined indicators: **`r length(uniqueEvtype)`**
+
+Since the percentage of those unique events is small, we are going to group them in a new indicator called **Other**.
+
+```{r}
+raw_data$eventOther <- (raw_data$eventConvection == FALSE & raw_data$eventExtremeTemp == FALSE &
+                            raw_data$eventFlood == FALSE & raw_data$eventWinter == FALSE)
+```
+
+#### Categorize event types
+
+Now that event types are grouped, set up a categorization hierarchy of event
+types.
+The hierarchy is needed because records can have multiple events listed in the
+`evtype` variable.
+E.g., *THUNDERSTORM WINDS/FLASH FLOOD*.
+
+The hierarchy is as follows.
+
+1. Convection (including lightning, tornado, thunderstorm, wind, and hail)
+2. Extreme temperature (including hot and cold)
+3. Flood (including flood, flash flood, rain)
+4. Winter (including snow, ice, freeze, or winter weather)
+5. Other
+
+Under this categorization hierarchy, the example event type of *THUNDERSTORM
+WINDS/FLASH FLOOD* would be assigned to the *Convection* category.
+I.e., higher categories outrank lower categories.
+
+```{r}
+raw_data$eventCategory <- ifelse(raw_data$eventConvection, 1, 
+                                 ifelse(raw_data$eventExtremeTemp, 2,
+                                        ifelse(raw_data$eventFlood, 3,
+                                               ifelse(raw_data$eventWinter, 4, 
+                                                      ifelse(raw_data$eventOther, 5, NA
+                                 )))))
+raw_data$eventCategory <- factor(raw_data$eventCategory, 
+                                 labels=c("Convection", "Extreme temperature", "Flood", "Winter", "Other"))
+# After all this grouping and cleaning lets see how our data groups by event category
+kable(raw_data[, .N, eventCategory], format='html')
+```
+
+
+#### Filter date ranges
+
+The date ranges for each category are below.
+
+```{r}
+# Lower date limits (years)
+convection_min_date <- year(min(raw_data$beginDate[raw_data$eventCategory == "Convection"]))
+others_min_date <- year(min(raw_data$beginDate[raw_data$eventCategory != "Convection"]))
+```
+
+Convection events reach as far back as: **`r convection_min_date`**
+
+However, the other categories only reach as far back as: **`r others_min_date`**
+
+Lets filter the data to include records with dates between a range that includes all categories.
+
+```{r}
+minYear <- year(min(raw_data$beginDate[raw_data$eventCategory != "Convection"]))
+maxYear <- year(max(raw_data$beginDate))
+# Filter our dataset by that date range
+raw_data <- raw_data[minYear <= year(beginDate) & year(beginDate) <= maxYear]
+```
+
+For the purpose of this analysis, we will limit the range to be: *`r minYear` - `r maxYear`*
+
+#### Filter to only 50 US states
+
+For the purposes of this analysis we are going to restrict the data to records from the 50 states. To do so we'll use R's built-in `state.abb` dataset.
+
+```{r}
+raw_data <- raw_data[state %in% state.abb]
+```
+
+
+#### Reshape data
+
+With our data normalized and filtered now we proceed to reshape it so it can be used for tabulation and plotting.
+
+```{r}
+# From our preprocessed datased we create a new dataset with only the columns we need for plotting
+columns <- c("Convection", "Extreme temperature", "Flood", "Winter", "Other")
+clean_data <- rbind(raw_data[, list(state, year = year(beginDate), eventCategory = factor(eventCategory, labels=columns), outcome = "Fatalities (thousands)", value = fatalities / 1E3)],
+                    raw_data[, list(state, year = year(beginDate), eventCategory = factor(eventCategory, labels=columns), outcome = "Injuries (thousands)", value = injuries / 1E3)],
+                    raw_data[, list(state, year = year(beginDate), eventCategory = factor(eventCategory, labels=columns), outcome = "Property damage ($, billions)", value = propertyDamage / 1E9)])
+
+# Total damages by state and category
+tabulationStateCategory <- clean_data[, list(value = sum(value)), list(state, eventCategory, outcome)]
+tabulationStateCategory <- tabulationStateCategory[, valueScaled := scale(value, center=FALSE), list(outcome)]
+# Total damages by state, also rank each state by it's to outcome
+tabulationState <- clean_data[, list(value = sum(value)), list(state, outcome)]
+tabulationState <- tabulationState[, rank := abs(rank(value, ties.method="random") - 51), list(outcome)]
+```
+
+At this point we have created the data products needed to draw conclusions of our analysis.
+
+## Results
+
+To get an overall picture of the data we will plot each state as a [coxcomb][coxcomb], or rose.
+
+Each rose shows the magnitude of each outcome
+
+* **F**atalities, at the 2 o'clock position
+
+* **I**njuries, at the 6 o'clock position, and
+
+* **P**roperty damage, at the 10 o'clock position
+
+A rose can show which states suffer very little (e.g., Hawaii), from a single outcome (e.g., Illinois), from two outcomes (e.g., Missouri), or all three outcomes (e.g., Florida).
+
+The color of each bar segment corresponds to event category.
+The outcomes combine data from `r minYear` to `r maxYear`.
+
+```{r smallmultiples, fig.align='center', fig.pos='center', fig.fullwidth = TRUE}
+ggplot(tabulationStateCategory, aes(x=outcome, y=valueScaled, fill=eventCategory)) +
+  theme_bw() +
+  geom_bar(alpha=1, stat="identity") +
+  coord_polar(theta="x") +
+  scale_fill_brewer(name="Category", palette="Set1") +
+  scale_x_discrete(name="", labels=c("F", "I", "P")) +
+  scale_y_continuous(name="", labels=NULL) +
+  facet_wrap(~ state, nrow=5, ncol=10) +
+  labs(title="State outcome from weather events - Fatalities - Injuries - Property damage") +
+  theme(legend.position="top") +
+  theme(axis.ticks.y=element_blank(), panel.grid=element_blank())
+```
+
+
+Above figure gives us a great overview of the outcomes by each damage category, is easy to spot for example that Texas produces most of the injures from Flood while California takes most of the property damage by the same weather event category. Is also worth to point out that Alabama takes most of the Fatalities and Injuries by Convection events, specifically from tornadoes.
+
+More specific conclusions can be drawn from the following tables.
+
+#####Tabulate the highest ranking state for each outcome.
+
+**Fatalities**
+
+```{r, results="asis"}
+# States with most Fatalities
+top <- tabulationState[grepl("Fatal", outcome) & rank <= 3, state]
+where <- expression(state %in% top & grepl("Fatal", outcome))
+select <- expression(list(state, value = format(value * 1E3, big.mark=","), eventCategory))
+tabulation <- tabulationStateCategory[eval(where), eval(select)]
+tabulation <- tabulation[order(value, decreasing=TRUE)]
+kable(tabulation, format = "markdown")
+```
+
+**Injuries**
+
+```{r, results="asis"}
+# States with most injuries
+top <- tabulationState[grepl("Inj", outcome) & rank <= 3, state]
+where <- expression(state %in% top & grepl("Inj", outcome))
+select <- expression(list(state, value = format(value * 1E3, big.mark=","), eventCategory))
+tabulation <- tabulationStateCategory[eval(where), eval(select)]
+tabulation <- tabulation[order(value, decreasing=TRUE)]
+kable(tabulation, format = "markdown")
+```
+
+**Property damage**
+
+```{r, results="asis"}
+top <- tabulationState[grepl("Prop", outcome) & rank <= 3, state]
+where <- expression(state %in% top & grepl("Prop", outcome))
+select <- expression(list(state, value = sprintf("$%s billion", format(round(value, digits=1), big.mark=",")), eventCategory))
+tabulation <- tabulationStateCategory[eval(where), eval(select)]
+tabulation <- tabulation[order(value, decreasing=TRUE)]
+kable(tabulation, format = "markdown")
+```
+
+
+
+[storm_database]: https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2
+[storm_docs]: https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf
+[storm_faq]: https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf
+[2009_summary]: http://www.ncdc.noaa.gov/oa/climate/sd/annsum2009.pdf
+[coxcomb]: http://understandinguncertainty.org/coxcombs
